@@ -2,16 +2,11 @@ const express = require("express");
 const router = express.Router();
 const Paste = require("../models/Paste.js");
 
-const getCurrentTime = (req) => {
+const getNow = (req) => {
   if (process.env.TEST_MODE === "1" && req.headers["x-test-now-ms"]) {
     return new Date(parseInt(req.headers["x-test-now-ms"]));
   }
   return new Date();
-};
-
-const buildUrl = (pasteId) => {
-  const baseUrl = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
-  return `${baseUrl}/p/${pasteId}`;
 };
 
 router.post("/", async (req, res) => {
@@ -19,14 +14,6 @@ router.post("/", async (req, res) => {
 
   if (!content || typeof content !== "string" || content.trim() === "") {
     return res.status(400).json({ error: "Content is required" });
-  }
-
-  if (ttl_seconds && (typeof ttl_seconds !== "number" || ttl_seconds < 1)) {
-    return res.status(400).json({ error: "ttl_seconds must be integer ≥ 1" });
-  }
-
-  if (max_views && (typeof max_views !== "number" || max_views < 1)) {
-    return res.status(400).json({ error: "max_views must be integer ≥ 1" });
   }
 
   let expiresAt = null;
@@ -42,37 +29,38 @@ router.post("/", async (req, res) => {
 
   await paste.save();
 
-  res.json({
+  const baseUrl = process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
+  res.status(201).json({
     id: paste._id,
-    url: buildUrl(paste._id)
+    url: `${baseUrl}/p/${paste._id}`
   });
 });
 
 router.get("/:id", async (req, res) => {
-  const now = getCurrentTime(req);
-  const paste = await Paste.findById(req.params.id);
-  
-  if (!paste) {
-    return res.status(404).json({ error: "Paste not found" });
+  try {
+    const paste = await Paste.findById(req.params.id);
+    const now = getNow(req);
+
+    if (!paste) return res.status(404).json({ error: "Paste not found" });
+
+    const isExpired = paste.expiresAt && now > paste.expiresAt;
+    const isOverLimit = paste.maxViews && paste.viewsUsed >= paste.maxViews;
+
+    if (isExpired || isOverLimit) {
+      return res.status(404).json({ error: "Paste not found or expired" });
+    }
+
+    paste.viewsUsed += 1;
+    await paste.save();
+
+    res.json({
+      content: paste.content,
+      remaining_views: paste.maxViews ? Math.max(0, paste.maxViews - paste.viewsUsed) : null,
+      expires_at: paste.expiresAt
+    });
+  } catch (err) {
+    res.status(404).json({ error: "Paste not found" });
   }
-
-  const isExpired = paste.expiresAt && now > paste.expiresAt;
-  const viewsExceeded = paste.maxViews !== null && paste.viewsUsed >= paste.maxViews;
-
-  if (isExpired || viewsExceeded) {
-    return res.status(404).json({ error: "Paste not found or expired" });
-  }
-
-  paste.viewsUsed += 1;
-  await paste.save();
-
-  const remainingViews = paste.maxViews !== null ? paste.maxViews - paste.viewsUsed : null;
-  
-  res.json({
-    content: paste.content,
-    remaining_views: remainingViews >= 0 ? remainingViews : 0,
-    expires_at: paste.expiresAt
-  });
 });
 
 module.exports = router;
